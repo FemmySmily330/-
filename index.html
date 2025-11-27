@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NeuroScreen AI Ruby - Research Assistant</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0d9488" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>
@@ -50,6 +54,84 @@
       ::-webkit-scrollbar-thumb:hover {
         background: #94a3b8; 
       }
+
+      /* Print Styles for PDF Export */
+      @media print {
+        @page {
+          margin: 1.5cm;
+          size: auto;
+        }
+        
+        /* Global resets for print */
+        body, html, #root, main {
+          height: auto !important;
+          min-height: 0 !important;
+          overflow: visible !important;
+          background-color: white !important;
+          width: 100% !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+
+        /* Hide non-essential elements */
+        .no-print, 
+        header, 
+        button, 
+        .fixed, 
+        .sticky,
+        nav,
+        select,
+        input,
+        textarea {
+          display: none !important;
+        }
+
+        /* Ensure content is visible */
+        #root {
+          display: block !important;
+        }
+
+        /* Typography adjustments */
+        body {
+          color: #000 !important;
+          font-size: 10pt;
+        }
+        
+        h1, h2, h3 {
+          page-break-after: avoid;
+          color: #000 !important;
+        }
+
+        /* Force background colors to print (for badges) */
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+
+        /* Layout adjustments */
+        .grid {
+          display: block !important;
+        }
+        
+        .break-inside-avoid {
+          page-break-inside: avoid !important;
+          break-inside: avoid !important;
+          margin-bottom: 20px !important;
+          border: 1px solid #ddd !important;
+          box-shadow: none !important;
+        }
+
+        /* Links */
+        a {
+          text-decoration: none !important;
+          color: #000 !important;
+        }
+        a[href]:after {
+          content: " (" attr(href) ")";
+          font-size: 8pt;
+          color: #666;
+        }
+      }
     </style>
   <script type="importmap">
 {
@@ -57,7 +139,9 @@
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "react": "https://aistudiocdn.com/react@^19.2.0",
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "html2canvas": "https://esm.sh/html2canvas@1.4.1",
+    "jspdf": "https://esm.sh/jspdf@2.5.1"
   }
 }
 </script>
@@ -65,5 +149,16 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('data:application/javascript;base64,c2VsZi5hZGRFdmVudExpc3RlbmVyKCdpbnN0YWxsJywgKGUpID0+IHsKICBjb25zb2xlLmxvZygnU2VydmljZSBXb3JrZXIgaW5zdGFsbGVkJyk7CiAgc2VsZi5za2lwV2FpdGluZygpOwp9KTsKCnNlbGYuYWRkRXZlbnRMaXN0ZW5lcignZmV0Y2gnLCAoZSkgPT4gewogIC8vIFBhc3MgdGhyb3VnaCByZXF1ZXN0cwp9KTsK').then(registration => {
+            console.log('SW registered: ', registration);
+          }).catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+        });
+      }
+    </script>
   </body>
 </html>

@@ -31,17 +31,20 @@ const getQueryString = (topic: string): string => {
 };
 
 // Fetch PMIDs from PubMed
-const searchPubMedIDs = async (query: string, days: number): Promise<string[]> => {
+const searchPubMedIDs = async (query: string, days: number, signal?: AbortSignal): Promise<string[]> => {
   // sort=date ensures we get latest updates
   // Added retmax=500 to allow for "unlimited" feel, though practically paged later if needed
   const url = `${PUBMED_BASE}/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&reldate=${days}&datetype=pdat&retmax=500&retmode=json&sort=date`;
   
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error(`PubMed Search Failed: ${res.statusText}`);
     const data = await res.json();
     return data.esearchresult?.idlist || [];
-  } catch (e) {
+  } catch (e: any) {
+    if (signal?.aborted || e.name === 'AbortError') {
+        throw new Error('Aborted');
+    }
     console.error("PubMed ID Search Error:", e);
     return [];
   }
@@ -58,7 +61,7 @@ interface PubMedRawData {
   authors: string;
 }
 
-const fetchPubMedDetails = async (ids: string[]): Promise<PubMedRawData[]> => {
+const fetchPubMedDetails = async (ids: string[], signal?: AbortSignal): Promise<PubMedRawData[]> => {
   if (ids.length === 0) return [];
   
   // Chunking requests to prevent URL length issues
@@ -71,10 +74,12 @@ const fetchPubMedDetails = async (ids: string[]): Promise<PubMedRawData[]> => {
   const parser = new DOMParser();
 
   for (const chunk of chunks) {
+    if (signal?.aborted) throw new Error("Aborted");
+    
     const url = `${PUBMED_BASE}/efetch.fcgi?db=pubmed&id=${chunk.join(',')}&retmode=xml`;
     
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal });
       if (!res.ok) {
         console.warn(`PubMed Fetch Failed for chunk: ${res.statusText}`);
         continue;
@@ -164,7 +169,8 @@ const fetchPubMedDetails = async (ids: string[]): Promise<PubMedRawData[]> => {
           authors
         });
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (signal?.aborted || e.name === 'AbortError') throw new Error("Aborted");
       console.error("Error fetching/parsing PubMed chunk:", e);
     }
   }
@@ -218,17 +224,33 @@ const parsePapersFromMarkdown = (text: string): Paper[] => {
 
   sections.forEach((section, index) => {
     const titleEnMatch = section.match(/###\s*(.+)/);
-    if (titleEnMatch) {
+    // Ensure we don't parse "SKIP" messages as papers
+    if (titleEnMatch && !section.startsWith('[SKIP]')) {
+      // Generate ID first
+      const pmidDoi = extractField(section, "PMID/DOI") || "N/A";
+      const titleEn = titleEnMatch[1].trim();
+      
+      // Create a stable ID based on PMID or Title
+      const pmidMatch = pmidDoi.match(/(\d{6,})/);
+      let stableId = "";
+      if (pmidMatch) {
+        stableId = `pmid-${pmidMatch[0]}`;
+      } else {
+        // Fallback to sanitized title hash for papers without PMID
+        const titleHash = titleEn.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 32);
+        stableId = `title-${titleHash}`;
+      }
+
       rawPapers.push({
-        id: `paper-${index}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        titleEn: titleEnMatch[1].trim(),
+        id: stableId,
+        titleEn: titleEn,
         titleCn: extractField(section, "中文标题") || "暂无中文标题",
         firstAuthor: extractField(section, "第一作者") || "Unknown",
         firstInstitution: extractField(section, "第一单位") || "Unknown Institution",
         correspondingAuthor: extractField(section, "通讯作者") || "Unknown",
         journal: extractField(section, "期刊") || "Unknown Journal",
         publishDate: extractField(section, "发表日期") || "Unknown Date",
-        pmidDoi: extractField(section, "PMID/DOI") || "N/A",
+        pmidDoi: pmidDoi,
         impactFactor: extractField(section, "影响因子") || "N/A",
         casQuartile: extractField(section, "中科院分区") || "",
         diseaseType: extractField(section, "疾病类型") || "General",
@@ -247,11 +269,8 @@ const parsePapersFromMarkdown = (text: string): Paper[] => {
   const uniquePapers: Paper[] = [];
   const seenKeys = new Set<string>();
   for (const paper of rawPapers) {
-    const pmid = paper.pmidDoi.match(/(\d{6,})/) ? paper.pmidDoi.match(/(\d{6,})/)![0] : null;
-    const key = pmid || paper.titleEn.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50);
-    
-    if (!seenKeys.has(key)) {
-      seenKeys.add(key);
+    if (!seenKeys.has(paper.id)) {
+      seenKeys.add(paper.id);
       uniquePapers.push(paper);
     }
   }
@@ -279,7 +298,8 @@ const parsePapersFromMarkdown = (text: string): Paper[] => {
 // Batch processing to handle Gemini output token limits
 const processPapersInBatches = async (
     ai: GoogleGenAI, 
-    papers: PubMedRawData[]
+    papers: PubMedRawData[],
+    signal?: AbortSignal
   ): Promise<{ text: string, groundingChunks: GroundingChunk[] }> => {
     
     const BATCH_SIZE = 10; // Process 10 papers at a time to stay within output limits
@@ -287,6 +307,8 @@ const processPapersInBatches = async (
     let accumulatedGrounding: GroundingChunk[] = [];
   
     for (let i = 0; i < papers.length; i += BATCH_SIZE) {
+      if (signal?.aborted) throw new Error("Aborted");
+
       const batch = papers.slice(i, i + BATCH_SIZE);
       console.log(`Processing Gemini Batch ${i/BATCH_SIZE + 1} / ${Math.ceil(papers.length/BATCH_SIZE)}`);
   
@@ -305,13 +327,27 @@ const processPapersInBatches = async (
         你是一个 PubMed 文献深度分析专家 (NeuroScreen AI Ruby)。
         以下是直接从 PubMed 数据库抓取的 ${batch.length} 篇神经退行性疾病相关文献的原始摘要数据。
         
-        **任务**: 
+        **重要任务: 严格相关性过滤 (STRICT RELEVANCE FILTER)**
+        PubMed 经常出现缩写混淆。在处理每篇文献前，必须进行相关性审查：
+        1. **ALS**: 剔除 "Antilymphocyte Serum" (抗淋巴细胞血清) 或 "Ammonium Lauryl Sulfate"。必须是 "Amyotrophic Lateral Sclerosis"。
+        2. **MSA**: 剔除 "Multiple Sequence Alignment" (多序列比对) 或 "Microsurgical Anastomosis"。必须是 "Multiple System Atrophy"。
+        3. **HD**: 剔除 "Hemodialysis" (血液透析) 或 "High Dose" 或 "High Definition"。必须是 "Huntington Disease"。
+        4. **CBD**: 剔除 "Cannabidiol" (大麻二酚，除非明确在讨论 CBD 这种病) 或 "Common Bile Duct" (胆总管)。必须是 "Corticobasal Degeneration"。
+        5. **PSP**: 剔除 "Postsynaptic Potential" (突触后电位) 或 "Polysaccharide Peptide"。必须是 "Progressive Supranuclear Palsy"。
+        
+        **如果文献与神经退行性疾病无关，请直接输出 "[SKIP] PMID: [原因]"，不要生成 Markdown 报告。**
+        
+        **对于通过审查的文献，任务如下**: 
         将每一篇文献转化为严格的 Markdown 格式报告。
-        必须输出所有 ${batch.length} 篇，严禁截断。
         
         **额外要求**:
         1. **影响因子 & 分区**: 必须利用 Google Search 查找该期刊最新的影响因子 (IF) 和中科院分区。
         2. **分类**: 归类为 ALS, MND, AD, PD, FTD, Neurodegeneration, MSA, HD, PSP, CBD 中最合适的一项。
+        3. **研究类型**: 
+           - 如果来自 PubMed/Web of Science/期刊官网 -> 标记为 "Literature"
+           - 如果来自 ClinicalTrials.gov 等注册平台 -> 标记为 "Clinical"
+           - 其他 -> "News"
+           (注意：现在输入的数据均来自 PubMed，所以默认多为 Literature 或 Clinical Trial 论文)
         
         **输出格式 (严格 Markdown)**:
         每篇之间用 "---" 分隔。
@@ -340,6 +376,8 @@ const processPapersInBatches = async (
       `;
   
       try {
+        if (signal?.aborted) throw new Error("Aborted");
+
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: prompt,
@@ -354,9 +392,10 @@ const processPapersInBatches = async (
         const chunks = (response.candidates?.[0]?.groundingMetadata?.groundingChunks || []) as GroundingChunk[];
         accumulatedGrounding.push(...chunks);
 
-      } catch (error) {
+      } catch (error: any) {
+        if (signal?.aborted || error.message.includes('Aborted')) throw new Error("Aborted");
         console.error(`Error processing batch ${i}:`, error);
-        // Continue to next batch instead of failing completely
+        // Continue to next batch instead of failing completely if not aborted
         accumulatedText += `\n\n> Error processing papers ${i+1} to ${i+batch.length}\n\n---\n\n`;
       }
     }
@@ -366,7 +405,8 @@ const processPapersInBatches = async (
 
 export const fetchLiteratureUpdates = async (
   topic: string, 
-  timeframe: string
+  timeframe: string,
+  signal?: AbortSignal
 ): Promise<{ papers: Paper[], rawResponse: string, groundingChunks: GroundingChunk[] }> => {
   
   if (!process.env.API_KEY) {
@@ -382,7 +422,7 @@ export const fetchLiteratureUpdates = async (
   console.log(`Scanning PubMed for: ${query} within last ${days} days`);
   
   // 1. Search IDs
-  const pmids = await searchPubMedIDs(query, days);
+  const pmids = await searchPubMedIDs(query, days, signal);
   console.log(`Found ${pmids.length} papers`);
 
   if (pmids.length === 0) {
@@ -390,14 +430,14 @@ export const fetchLiteratureUpdates = async (
   }
 
   // 2. Fetch XML Details
-  const rawData = await fetchPubMedDetails(pmids);
+  const rawData = await fetchPubMedDetails(pmids, signal);
 
   if (rawData.length === 0) {
      return { papers: [], rawResponse: "Found IDs but failed to fetch details from PubMed.", groundingChunks: [] };
   }
 
   // B. Process with Gemini in Batches
-  const { text, groundingChunks } = await processPapersInBatches(ai, rawData);
+  const { text, groundingChunks } = await processPapersInBatches(ai, rawData, signal);
 
   // C. Parse
   const parsedPapers = parsePapersFromMarkdown(text);
